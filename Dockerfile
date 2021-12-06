@@ -2,7 +2,7 @@ FROM debian:stable-slim AS build_image
 WORKDIR build
 
 ADD pom.xml pom.xml
-ADD storage storage
+ADD server server
 ADD build.images.sh build.images.sh
 
 RUN bash ./build.images.sh
