@@ -15,8 +15,7 @@ COPY ./execute.sh /dynamo/execute.sh
 
 RUN chmod -R 777 /dynamo
 
-EXPOSE 9092/tcp
-EXPOSE 9093/tcp
+EXPOSE 8000/tcp
 
 CMD ["sh", "/dynamo/execute.sh"]
 
