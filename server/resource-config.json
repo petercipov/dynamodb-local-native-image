@@ -1,0 +1,11 @@
+{
+  "bundles": [
+  ],
+  "resources": {
+    "includes": [
+      {"pattern":".*/mime.*properties$$"},
+      {"pattern":".*/encoding.*properties$$"}
+    ],
+    "excludes": []
+  }
+}
