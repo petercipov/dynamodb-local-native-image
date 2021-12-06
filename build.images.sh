@@ -1,7 +1,7 @@
 #!/bin/bash
 
 apt-get update
-apt-get install -y curl
+apt-get install -y curl build-essential 
 
 curl -fsSL -o dist.tar.gz  https://github.com/graalvm/graalvm-ce-builds/releases/download/vm-21.3.0/graalvm-ce-java11-linux-amd64-21.3.0.tar.gz
 tar -xzf dist.tar.gz
