@@ -1,16 +1,15 @@
 import com.amazonaws.services.dynamodbv2.local.shared.access.QueryResultInfo;
 import com.amazonaws.services.dynamodbv2.local.shared.access.TableInfo;
 import com.amazonaws.services.dynamodbv2.local.shared.access.sqlite.TableSchemaInfo;
-import com.amazonaws.services.dynamodbv2.local.shared.exceptions.LocalDBAccessException;
-import com.amazonaws.services.dynamodbv2.local.shared.exceptions.LocalDBAccessExceptionType;
 import com.amazonaws.services.dynamodbv2.local.shared.model.AttributeValue;
 import com.amazonaws.services.dynamodbv2.local.shared.model.Condition;
 import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
 import com.amazonaws.services.dynamodbv2.model.BillingMode;
-import com.amazonaws.services.dynamodbv2.model.ComparisonOperator;
 import com.amazonaws.services.dynamodbv2.model.GlobalSecondaryIndex;
 import com.amazonaws.services.dynamodbv2.model.GlobalSecondaryIndexDescription;
 import com.amazonaws.services.dynamodbv2.model.IndexStatus;
+import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
+import com.amazonaws.services.dynamodbv2.model.KeyType;
 import com.amazonaws.services.dynamodbv2.model.LocalSecondaryIndex;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughputDescription;
@@ -21,10 +20,8 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.NavigableSet;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
@@ -41,8 +38,8 @@ public class Table {
     private Optional<String> timeToLiveAttributeName;
     private ReentrantReadWriteLock writeLock = new ReentrantReadWriteLock();
 
-    //hashKey, rangeKey
-    private final ConcurrentSkipListMap<AttributeValue, ConcurrentSkipListMap<AttributeValue, Map<String, AttributeValue>>> records;
+    private final Records tableRecords;
+    private final Map<String, Records> secondaryIndexRecords;
 
     public Table(final String tableName,
                  final AttributeDefinition hashKey,
@@ -57,6 +54,7 @@ public class Table {
         this.tableName = tableName;
         this.hashKeyDef = hashKey;
         this.rangeKeyDef = rangeKey;
+
         this.allAttributes = allAttributes.stream().collect(Collectors.toMap(def -> def.getAttributeName(), def -> def));
         this.lsiIndexes =
             (lsiIndexes == null ? List.<LocalSecondaryIndex>of() : lsiIndexes)
@@ -71,7 +69,31 @@ public class Table {
         this.streamSpecification = streamSpecification;
 
         this.timeToLiveAttributeName = Optional.empty();
-        this.records = new ConcurrentSkipListMap<>();
+        this.tableRecords = new Records(
+            this.hashKeyDef.getAttributeName(),
+            this.rangeKeyDef.getAttributeName());
+
+        this.secondaryIndexRecords = lsiIndexes
+            .stream()
+            .map(def -> {
+                final Optional<KeySchemaElement> hashKeySchema = def.getKeySchema()
+                    .stream()
+                    .filter(element -> element.getKeyType()
+                        .equals(KeyType.HASH.toString()))
+                    .findFirst();
+
+                final Optional<KeySchemaElement> rangeKeySchema =
+                    def.getKeySchema().stream().filter(element -> element.getKeyType()
+                        .equals(KeyType.RANGE.toString())).findFirst();
+
+                return new AbstractMap.SimpleEntry<String, Records>(
+                    def.getIndexName(),
+                    new Records(
+                        hashKeySchema.get().getAttributeName(),
+                        rangeKeySchema.get().getAttributeName())
+                );
+            })
+            .collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue()));
     }
 
     public void update(final List<AttributeDefinition> updatedAttributeDefinitions,
@@ -107,54 +129,21 @@ public class Table {
     }
 
     public Map<String, AttributeValue> getRecord(final Map<String, AttributeValue> primaryKey) {
-        final AttributeValue hk = primaryKey.get(hashKeyDef.getAttributeName());
-        final AttributeValue rk = primaryKey.get(rangeKeyDef.getAttributeName());
-
-        if (hk == null || rk == null) {
-            return Map.of();
-        }
-
-        final Map<AttributeValue, Map<String, AttributeValue>> rangeMap = records.get(hk);
-        if (rangeMap == null) {
-            return Map.of();
-        }
-
-        final Map<String, AttributeValue> recordMap = rangeMap.get(rk);
-        if (recordMap == null) {
-            return Map.of();
-        }
-
-        return recordMap;
+        return this.tableRecords.getRecord(primaryKey);
     }
 
     public boolean deleteRecord(final Map<String, AttributeValue> primaryKey, final boolean isSystemDelete) {
-        final AttributeValue hk = primaryKey.get(hashKeyDef.getAttributeName());
-        final AttributeValue rk = primaryKey.get(rangeKeyDef.getAttributeName());
-
-        if (hk == null || rk == null) {
-            return false;
-        }
-
-        final Map<AttributeValue, Map<String, AttributeValue>> rangeMap = records.get(hk);
-        if (rangeMap == null) {
-            return false;
-        }
-
-        final Map<String, AttributeValue> recordMap = rangeMap.remove(rk);
-        return recordMap != null;
+        return tableRecords.deleteRecord(primaryKey);
     }
 
     public void putRecord(final AttributeValue hashKey,
                           final AttributeValue rangeKey,
                           final Map<String, AttributeValue> record) {
 
-        var rangeMap = records.get(hashKey);
-        if (rangeMap == null) {
-            rangeMap = new ConcurrentSkipListMap<>();
-            records.put(hashKey, rangeMap);
-        }
-
-        rangeMap.put(rangeKey, record);
+        this.tableRecords.put(record);
+        this.secondaryIndexRecords.forEach((k, rec) -> {
+            rec.put(record);
+        });
     }
 
     public QueryResultInfo queryRecords(final String indexName,
@@ -166,105 +155,14 @@ public class Table {
                                         final byte[] endHash,
                                         final boolean isScan,
                                         final boolean isGSIIndex) {
-        final Optional<AttributeValue> hk = Optional.ofNullable(exclusiveStartKey.get(hashKeyDef.getAttributeName()));
-        final Optional<AttributeValue> rk = Optional.ofNullable(exclusiveStartKey.get(rangeKeyDef.getAttributeName()));
-
-        final var recordsToTraverse = hk
-            .map(key -> records.tailMap(key, true))
-            .orElse(records);
-
-        final NavigableSet<AttributeValue> hashKeysToTraverse = recordsToTraverse.keySet();
-
-        AtomicReference<AttributeValue> lastProceesedHash = new AtomicReference<>();
-        AtomicReference<AttributeValue> lastProcessedRange = new AtomicReference<>();
-
-        final List<Map<String, AttributeValue>> scannedRecords = hashKeysToTraverse.stream()
-            .flatMap(hashKey -> {
-                final boolean is_hk_exclusive = hk.map(hashKey::equals).orElse(false);
-                final var rangeMap = recordsToTraverse.get(hashKey);
-
-                if (is_hk_exclusive) {
-                    final var rangesToTraverse = rk
-                        .map(key -> rangeMap.tailMap(key, false))
-                        .orElse(rangeMap);
-                    return rangesToTraverse.entrySet().stream().map(e -> new AbstractMap.SimpleEntry<>(hashKey, e));
-                } else {
-                    return rangeMap.entrySet().stream().map(e -> new AbstractMap.SimpleEntry<>(hashKey, e));
-                }
-
-            })
-            .filter(entry -> {
-                final AttributeValue hashKeyValue = entry.getKey();
-                final AttributeValue rangeKeyValue = entry.getValue().getKey();
-                final var content = entry.getValue().getValue();
-
-                lastProceesedHash.set(hashKeyValue);
-                lastProcessedRange.set(rangeKeyValue);
-
-                boolean result = true;
-
-                if (conditions.containsKey(hashKeyDef.getAttributeName())) {
-                    result = result && predicate(hashKeyValue,
-                        conditions.get(hashKeyDef.getAttributeName()));
-                }
-
-                if (conditions.containsKey(rangeKeyDef.getAttributeName())) {
-                    result = result && predicate(rangeKeyValue,
-                        conditions.get(rangeKeyDef.getAttributeName()));
-                }
-
-                result = result && content.entrySet()
-                    .stream()
-                    .filter(e -> conditions.containsKey(e.getKey()))
-                    .map(e -> predicate(e.getValue(), conditions.get(e.getKey())))
-                    .reduce(true, (acc, value) -> acc && value)
-                ;
-
-                return result;
-            })
-            .limit(limit == null ? 1000 : limit)
-            .map(record -> {
-                Map<String, AttributeValue> map = new HashMap<>(record.getValue().getValue());
-                map.put(hashKeyDef.getAttributeName(), record.getKey());
-                map.put(rangeKeyDef.getAttributeName(), record.getValue().getKey());
-                return map;
-            })
-            .collect(Collectors.toList());
-
-        Map<String, AttributeValue> lastProcessed = new HashMap<>();
-        if (lastProceesedHash.get() != null && lastProcessedRange.get() != null) {
-            lastProcessed.put(hashKeyDef.getAttributeName(), lastProceesedHash.get());
-            lastProcessed.put(rangeKeyDef.getAttributeName(), lastProcessedRange.get());
+        if (this.secondaryIndexRecords.containsKey(indexName)) {
+            return this.secondaryIndexRecords.get(indexName).queryRecords(conditions, exclusiveStartKey, limit,
+                rangeKeyDef.getAttributeName());
         }
-        return new QueryResultInfo(scannedRecords, lastProcessed);
+
+        return this.tableRecords.queryRecords(conditions, exclusiveStartKey, limit, rangeKeyDef.getAttributeName());
     }
 
-    private boolean predicate(AttributeValue value, Condition condition) {
-
-        ComparisonOperator comparisonOperator = ComparisonOperator.fromValue(condition.getComparisonOperator());
-        final AttributeValue conditionValue = condition.getAttributeValueList().get(0);
-
-        switch (comparisonOperator) {
-            case EQ:
-                return value.equals(conditionValue);
-            case LT:
-                return value.lessThan(conditionValue);
-            case GT:
-                return value.greaterThan(conditionValue);
-            case LE:
-                return value.equals(conditionValue) || value.lessThan(conditionValue) ;
-            case GE:
-                return value.equals(conditionValue) || value.greaterThan(conditionValue) ;
-            case BEGINS_WITH:
-                return value.getSValue().startsWith(conditionValue.getSValue());
-            case BETWEEN:
-                return
-                    (value.equals(conditionValue) || value.lessThan(conditionValue)) &&
-                    (value.equals(conditionValue) || value.greaterThan(conditionValue));
-            default:
-                throw new LocalDBAccessException(LocalDBAccessExceptionType.VALIDATION_EXCEPTION, "Unsupported comparison operator for query: " + comparisonOperator);
-        }
-    }
 
     public long itemCount() {
         return 0;

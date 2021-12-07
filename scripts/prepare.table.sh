@@ -26,8 +26,13 @@ aws dynamodb describe-table \
   --table-name MusicCollection \
   --endpoint-url http://localhost:8000
 
-
-aws dynamodb put-item --table-name MusicCollection --item file://./item.json \
+aws dynamodb batch-write-item --request-items file://./items.json \
     --endpoint-url http://localhost:8000 \
-    --return-consumed-capacity TOTAL \
+    --return-consumed-capacity INDEXES \
     --return-item-collection-metrics SIZE
+
+aws dynamodb scan --table-name MusicCollection \
+    --endpoint-url http://localhost:8000
+
+aws dynamodb scan --table-name MusicCollection \
+    --endpoint-url http://localhost:8000  --index-name  AlbumTitleIndex

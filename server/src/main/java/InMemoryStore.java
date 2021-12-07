@@ -64,7 +64,7 @@ public class InMemoryStore implements LocalDBAccess {
                     return true;
                 }
             })
-            .limit(limit == null ? 100 : limit < 0 ? Long.MAX_VALUE : limit)
+            .limit(limit == null ? 100 : limit < 0 ? 100 : limit)
             .collect(Collectors.toList());
 
         final String lastValue = tableNames.isEmpty() ? null : tableNames.get(tableNames.size() - 1);
