@@ -10,7 +10,6 @@ RUN bash ./build.images.sh
 FROM debian:stable-slim
 WORKDIR dynamo
 COPY --from=build_image /build/server/server-1.0  /dynamo/server
-COPY --from=build_image /build/server/native-libs /dynamo
 COPY ./execute.sh /dynamo/execute.sh
 
 RUN chmod -R 777 /dynamo
